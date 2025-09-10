@@ -4,8 +4,10 @@ on:
   pull_request:
   push:
     branches: [ main, master, develop ]
+
 jobs:
   go:
+    if: ${{ hashFiles('services/api/**') != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,7 +18,9 @@ jobs:
         run: go build ./services/api/...
       - name: Test
         run: go test ./... || true
+
   web:
+    if: ${{ hashFiles('apps/web/**') != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
