@@ -1,0 +1,94 @@
+name: CD - Dev (build, push, deploy)
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+permissions:
+  contents: read
+  packages: write
+env:
+  REGISTRY: ghcr.io
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: { svc: [ api, web, worker ] }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set image name
+        id: img
+        run: echo "name=${{ env.REGISTRY }}/${{ github.repository_owner }}/ai-mp-${{ matrix.svc }}" >> $GITHUB_OUTPUT
+      - name: Build & push image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.svc == 'web' && 'apps/web' || (matrix.svc == 'api' && 'services/api' || 'services/worker') }}
+          file: ${{ matrix.svc == 'web' && 'apps/web/Dockerfile' || (matrix.svc == 'api' && 'services/api/Dockerfile' || 'services/worker/Dockerfile') }}
+          push: true
+          tags: |
+            ${{ steps.img.outputs.name }}:${{ github.sha }}
+            ${{ steps.img.outputs.name }}:latest
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.30.0'
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${KUBECONFIG_B64}" | base64 -d > ~/.kube/config
+        env:
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+      - name: Ensure namespace
+        run: |
+          kubectl create namespace "${K8S_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+        env:
+          K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE }}
+      - name: Create/Update image pull secret
+        run: |
+          kubectl -n "${K8S_NAMESPACE}" create secret docker-registry regcred \
+            --docker-server=ghcr.io \
+            --docker-username="${REGISTRY_USERNAME}" \
+            --docker-password="${REGISTRY_PASSWORD}" \
+            --docker-email="devnull@example.com" \
+            --dry-run=client -o yaml | kubectl apply -f -
+        env:
+          K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE }}
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+      - name: Deploy API via Helm
+        run: |
+          helm upgrade --install api ./helm/api -n "${K8S_NAMESPACE}" \
+            --set image.repository="ghcr.io/${{ github.repository_owner }}/ai-mp-api" \
+            --set image.tag="${{ github.sha }}" \
+            --set ingress.host="${API_HOST}"
+        env:
+          K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE }}
+          API_HOST: ${{ vars.API_HOST }}
+      - name: Deploy Web via Helm
+        run: |
+          helm upgrade --install web ./helm/web -n "${K8S_NAMESPACE}" \
+            --set image.repository="ghcr.io/${{ github.repository_owner }}/ai-mp-web" \
+            --set image.tag="${{ github.sha }}" \
+            --set ingress.host="${WEB_HOST}" \
+            --set env.NEXT_PUBLIC_API_URL="https://${API_HOST}"
+        env:
+          K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE }}
+          WEB_HOST: ${{ vars.WEB_HOST }}
+          API_HOST: ${{ vars.API_HOST }}
+      - name: Deploy Worker via Helm
+        run: |
+          helm upgrade --install worker ./helm/worker -n "${K8S_NAMESPACE}" \
+            --set image.repository="ghcr.io/${{ github.repository_owner }}/ai-mp-worker" \
+            --set image.tag="${{ github.sha }}"
+        env:
+          K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE }}
