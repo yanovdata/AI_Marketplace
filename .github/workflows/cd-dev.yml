@@ -13,17 +13,23 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
-  build-web:
-    if: ${{ hashFiles('apps/web/**') != '' }}
+  web:
     runs-on: ubuntu-latest
+    environment: dev
     steps:
       - uses: actions/checkout@v4
+      - id: chkweb
+        name: Check apps/web exists
+        run: |
+          if [ -d "apps/web" ]; then echo "exists=true" >> "$GITHUB_OUTPUT"; else echo "exists=false" >> "$GITHUB_OUTPUT"; fi
       - uses: docker/login-action@v3
+        if: steps.chkweb.outputs.exists == 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build & push web
+        if: steps.chkweb.outputs.exists == 'true'
         uses: docker/build-push-action@v6
         with:
           context: apps/web
@@ -33,62 +39,24 @@ jobs:
             ${{ env.REGISTRY }}/${{ github.repository_owner }}/ai-mp-web:${{ github.sha }}
             ${{ env.REGISTRY }}/${{ github.repository_owner }}/ai-mp-web:latest
 
-  build-api:
-    if: ${{ hashFiles('services/api/**') != '' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build & push api
-        uses: docker/build-push-action@v6
-        with:
-          context: services/api
-          file: services/api/Dockerfile
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/ai-mp-api:${{ github.sha }}
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/ai-mp-api:latest
-
-  build-worker:
-    if: ${{ hashFiles('services/worker/**') != '' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build & push worker
-        uses: docker/build-push-action@v6
-        with:
-          context: services/worker
-          file: services/worker/Dockerfile
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/ai-mp-worker:${{ github.sha }}
-            ${{ env.REGISTRY }}/${{ github.repository_owner }}/ai-mp-worker:latest
-
-  deploy-web:
-    if: ${{ hashFiles('apps/web/**') != '' && hashFiles('helm/web/**') != '' }}
-    needs: [build-web]
-    runs-on: ubuntu-latest
-    environment: dev
-    steps:
-      - uses: actions/checkout@v4
+      # deploy (если есть helm/web)
+      - id: chkhelm
+        name: Check helm/web exists
+        run: |
+          if [ -d "helm/web" ]; then echo "exists=true" >> "$GITHUB_OUTPUT"; else echo "exists=false" >> "$GITHUB_OUTPUT"; fi
       - uses: azure/setup-kubectl@v4
+        if: steps.chkweb.outputs.exists == 'true' && steps.chkhelm.outputs.exists == 'true'
         with:
           version: 'v1.30.0'
       - name: Configure kubeconfig
+        if: steps.chkweb.outputs.exists == 'true' && steps.chkhelm.outputs.exists == 'true'
         run: |
           mkdir -p ~/.kube
           echo "${KUBECONFIG_B64}" | base64 -d > ~/.kube/config
-        env: { KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }} }
+        env:
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
       - name: Ensure namespace + regcred
+        if: steps.chkweb.outputs.exists == 'true' && steps.chkhelm.outputs.exists == 'true'
         run: |
           kubectl create namespace "${K8S_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
           kubectl -n "${K8S_NAMESPACE}" create secret docker-registry regcred \
@@ -102,6 +70,7 @@ jobs:
           REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
           REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
       - name: Deploy web (Helm)
+        if: steps.chkweb.outputs.exists == 'true' && steps.chkhelm.outputs.exists == 'true'
         run: |
           helm upgrade --install web ./helm/web -n "${K8S_NAMESPACE}" \
             --set image.repository="ghcr.io/${{ github.repository_owner }}/ai-mp-web" \
@@ -113,22 +82,49 @@ jobs:
           WEB_HOST: ${{ vars.WEB_HOST }}
           API_HOST: ${{ vars.API_HOST }}
 
-  deploy-api:
-    if: ${{ hashFiles('services/api/**') != '' && hashFiles('helm/api/**') != '' }}
-    needs: [build-api]
+  api:
     runs-on: ubuntu-latest
     environment: dev
     steps:
       - uses: actions/checkout@v4
+      - id: chkapi
+        name: Check services/api exists
+        run: |
+          if [ -d "services/api" ]; then echo "exists=true" >> "$GITHUB_OUTPUT"; else echo "exists=false" >> "$GITHUB_OUTPUT"; fi
+      - uses: docker/login-action@v3
+        if: steps.chkapi.outputs.exists == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build & push api
+        if: steps.chkapi.outputs.exists == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: services/api
+          file: services/api/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/ai-mp-api:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/ai-mp-api:latest
+
+      - id: chkhelm
+        name: Check helm/api exists
+        run: |
+          if [ -d "helm/api" ]; then echo "exists=true" >> "$GITHUB_OUTPUT"; else echo "exists=false" >> "$GITHUB_OUTPUT"; fi
       - uses: azure/setup-kubectl@v4
+        if: steps.chkapi.outputs.exists == 'true' && steps.chkhelm.outputs.exists == 'true'
         with:
           version: 'v1.30.0'
       - name: Configure kubeconfig
+        if: steps.chkapi.outputs.exists == 'true' && steps.chkhelm.outputs.exists == 'true'
         run: |
           mkdir -p ~/.kube
           echo "${KUBECONFIG_B64}" | base64 -d > ~/.kube/config
-        env: { KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }} }
+        env:
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
       - name: Ensure namespace + regcred
+        if: steps.chkapi.outputs.exists == 'true' && steps.chkhelm.outputs.exists == 'true'
         run: |
           kubectl create namespace "${K8S_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
           kubectl -n "${K8S_NAMESPACE}" create secret docker-registry regcred \
@@ -142,6 +138,7 @@ jobs:
           REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
           REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
       - name: Deploy api (Helm)
+        if: steps.chkapi.outputs.exists == 'true' && steps.chkhelm.outputs.exists == 'true'
         run: |
           helm upgrade --install api ./helm/api -n "${K8S_NAMESPACE}" \
             --set image.repository="ghcr.io/${{ github.repository_owner }}/ai-mp-api" \
@@ -151,22 +148,49 @@ jobs:
           K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE }}
           API_HOST: ${{ vars.API_HOST }}
 
-  deploy-worker:
-    if: ${{ hashFiles('services/worker/**') != '' && hashFiles('helm/worker/**') != '' }}
-    needs: [build-worker]
+  worker:
     runs-on: ubuntu-latest
     environment: dev
     steps:
       - uses: actions/checkout@v4
+      - id: chkworker
+        name: Check services/worker exists
+        run: |
+          if [ -d "services/worker" ]; then echo "exists=true" >> "$GITHUB_OUTPUT"; else echo "exists=false" >> "$GITHUB_OUTPUT"; fi
+      - uses: docker/login-action@v3
+        if: steps.chkworker.outputs.exists == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build & push worker
+        if: steps.chkworker.outputs.exists == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: services/worker
+          file: services/worker/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/ai-mp-worker:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/ai-mp-worker:latest
+
+      - id: chkhelm
+        name: Check helm/worker exists
+        run: |
+          if [ -d "helm/worker" ]; then echo "exists=true" >> "$GITHUB_OUTPUT"; else echo "exists=false" >> "$GITHUB_OUTPUT"; fi
       - uses: azure/setup-kubectl@v4
+        if: steps.chkworker.outputs.exists == 'true' && steps.chkhelm.outputs.exists == 'true'
         with:
           version: 'v1.30.0'
       - name: Configure kubeconfig
+        if: steps.chkworker.outputs.exists == 'true' && steps.chkhelm.outputs.exists == 'true'
         run: |
           mkdir -p ~/.kube
           echo "${KUBECONFIG_B64}" | base64 -d > ~/.kube/config
-        env: { KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }} }
+        env:
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
       - name: Ensure namespace + regcred
+        if: steps.chkworker.outputs.exists == 'true' && steps.chkhelm.outputs.exists == 'true'
         run: |
           kubectl create namespace "${K8S_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
           kubectl -n "${K8S_NAMESPACE}" create secret docker-registry regcred \
@@ -180,6 +204,7 @@ jobs:
           REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
           REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
       - name: Deploy worker (Helm)
+        if: steps.chkworker.outputs.exists == 'true' && steps.chkhelm.outputs.exists == 'true'
         run: |
           helm upgrade --install worker ./helm/worker -n "${K8S_NAMESPACE}" \
             --set image.repository="ghcr.io/${{ github.repository_owner }}/ai-mp-worker" \

@@ -6,34 +6,47 @@ on:
     branches: [ main, master, develop ]
 
 jobs:
-  go:
-    if: ${{ hashFiles('services/api/**') != '' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.22"
-      - name: Build API
-        run: go build ./services/api/...
-      - name: Test
-        run: go test ./... || true
-
   web:
-    if: ${{ hashFiles('apps/web/**') != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - id: chk
+        name: Check apps/web exists
+        run: |
+          if [ -d "apps/web" ]; then echo "exists=true" >> "$GITHUB_OUTPUT"; else echo "exists=false" >> "$GITHUB_OUTPUT"; fi
       - uses: actions/setup-node@v4
+        if: steps.chk.outputs.exists == 'true'
         with:
           node-version: "20"
       - name: Setup pnpm
+        if: steps.chk.outputs.exists == 'true'
         run: |
           corepack enable
           corepack prepare pnpm@latest --activate
       - name: Install
+        if: steps.chk.outputs.exists == 'true'
         working-directory: apps/web
         run: pnpm install --no-frozen-lockfile
       - name: Build
+        if: steps.chk.outputs.exists == 'true'
         working-directory: apps/web
         run: pnpm build
+
+  api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: chk
+        name: Check services/api exists
+        run: |
+          if [ -d "services/api" ]; then echo "exists=true" >> "$GITHUB_OUTPUT"; else echo "exists=false" >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/setup-go@v5
+        if: steps.chk.outputs.exists == 'true'
+        with:
+          go-version: "1.22"
+      - name: Build API
+        if: steps.chk.outputs.exists == 'true'
+        run: go build ./services/api/...
+      - name: Test
+        if: steps.chk.outputs.exists == 'true'
+        run: go test ./... || true
