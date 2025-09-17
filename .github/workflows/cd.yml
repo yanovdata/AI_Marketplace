@@ -1,0 +1,142 @@
+name: CD - Build images to GHCR + deploy with Helm
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: chk
+        name: Check apps/web exists
+        run: |
+          if [ -d "apps/web" ]; then echo "exists=true" >> "$GITHUB_OUTPUT"; else echo "exists=false" >> "$GITHUB_OUTPUT"; fi
+      - name: Login to GHCR
+        if: steps.chk.outputs.exists == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build & Push web
+        if: steps.chk.outputs.exists == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: apps/web
+          file: apps/web/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/ai-mp-web:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/ai-mp-web:latest
+
+  build-api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: chk
+        name: Check services/api exists
+        run: |
+          if [ -d "services/api" ]; then echo "exists=true" >> "$GITHUB_OUTPUT"; else echo "exists=false" >> "$GITHUB_OUTPUT"; fi
+      - name: Login to GHCR
+        if: steps.chk.outputs.exists == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build & Push api
+        if: steps.chk.outputs.exists == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: services/api
+          file: services/api/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/ai-mp-api:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/ai-mp-api:latest
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [build-web, build-api]
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.30.0'
+
+      - name: Write kubeconfig from secret
+        run: |
+          mkdir -p ~/.kube
+          echo "${KUBECONFIG_B64}" | base64 -d > ~/.kube/config
+        env:
+          KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+
+      - name: Ensure namespace & registry pull secret (optional)
+        run: |
+          kubectl create namespace "${K8S_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+          if [ -n "${REGISTRY_USERNAME}" ] && [ -n "${REGISTRY_PASSWORD}" ]; then
+            kubectl -n "${K8S_NAMESPACE}" create secret docker-registry regcred \
+              --docker-server=ghcr.io \
+              --docker-username="${REGISTRY_USERNAME}" \
+              --docker-password="${REGISTRY_PASSWORD}" \
+              --docker-email="devnull@example.com" \
+              --dry-run=client -o yaml | kubectl apply -f -
+          else
+            echo "REGISTRY_USERNAME/REGISTRY_PASSWORD not set — пропускаю regcred (сделайте образы public или добавьте секреты)"
+          fi
+        env:
+          K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE }}
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Deploy API (if chart exists)
+        run: |
+          if [ -d "helm/api" ]; then
+            helm upgrade --install api ./helm/api -n "${K8S_NAMESPACE}" \
+              --set image.repository="ghcr.io/${{ github.repository_owner }}/ai-mp-api" \
+              --set image.tag="${{ github.sha }}" \
+              --set image.pullPolicy="IfNotPresent" \
+              $( [ -n "${HAS_REGCRED}" ] && echo --set image.pullSecretName="regcred" ) \
+              --set ingress.className="nginx" \
+              --set ingress.host="${API_HOST}";
+          else
+            echo "helm/api отсутствует — пропускаю деплой API"
+          fi
+        env:
+          K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE }}
+          API_HOST: ${{ vars.API_HOST }}
+          HAS_REGCRED: ${{ secrets.REGISTRY_USERNAME }}
+
+      - name: Deploy Web (if chart exists)
+        run: |
+          if [ -d "helm/web" ]; then
+            helm upgrade --install web ./helm/web -n "${K8S_NAMESPACE}" \
+              --set image.repository="ghcr.io/${{ github.repository_owner }}/ai-mp-web" \
+              --set image.tag="${{ github.sha }}" \
+              --set image.pullPolicy="IfNotPresent" \
+              $( [ -n "${HAS_REGCRED}" ] && echo --set image.pullSecretName="regcred" ) \
+              --set service.port=80 \
+              --set ingress.className="nginx" \
+              --set ingress.host="${WEB_HOST}" \
+              --set env.NEXT_PUBLIC_API_URL="https://${API_HOST}";
+          else
+            echo "helm/web отсутствует — пропускаю деплой Web"
+          fi
+        env:
+          K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE }}
+          WEB_HOST: ${{ vars.WEB_HOST }}
+          API_HOST: ${{ vars.API_HOST }}
+          HAS_REGCRED: ${{ secrets.REGISTRY_USERNAME }}
